@@ -1,0 +1,28 @@
+# Copy to private/profile.toml and edit locally. process.sh loads that path.
+model = "jev-latest"
+max_examples = 6
+min_probability = 0.85
+min_confidence = 0.70
+# Keep the extra evidence score informational for label-only triage.
+# Set true to require min_evidence as an additional review threshold.
+evidence_gate = false
+min_evidence = 0.80
+# Eligible feedback older than this is removed from active learning snapshots
+# when you run `feedback prune`. Zero retains feedback until explicitly deleted.
+retention_days = 0
+preferences = ""
+# First N cleaned body words, additionally capped at 4,000 characters.
+# Zero disables body fetching and excludes cached excerpts from Jev requests.
+body_words = 300
+
+[profile]
+full_name = ""
+name_variations = []
+company_names = []
+
+# Optional explicit rules. Both fields must match; matching is case-insensitive.
+# All matching rules must agree, otherwise the message needs review.
+# [[rules]]
+# sender = "offers@example.com"
+# subject_contains = "oferta"
+# category = "spam"

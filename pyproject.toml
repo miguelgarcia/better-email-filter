@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "better-email"
+version = "0.1.0"
+description = "Personal Gmail triage with Jev and explicit human feedback"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.28,<1",
+  "google-auth>=2.40,<3",
+  "google-auth-oauthlib>=1.2,<2",
+  "keyring>=25,<26",
+]
+
+[project.scripts]
+better-email = "better_email.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
