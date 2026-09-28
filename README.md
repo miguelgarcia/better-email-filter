@@ -5,9 +5,10 @@ Classify messages as **Spam**, **Ignore**, or **Important**, with **Review** for
 uncertain decisions. Correct labels in Gmail and reuse those corrections as
 examples for future classifications.
 
-This version supports **macOS**, one Gmail account per data directory, and a
-Spanish/English classification policy. Credentials use macOS Keychain; Linux and
-Windows credential storage is not implemented. It is an experimental personal
+This version supports **macOS and Linux**, one Gmail account per data directory, and a
+Spanish/English classification policy. macOS uses Keychain by default; headless Linux
+supports explicitly selected owner-only credential files. Windows is not supported.
+It is an experimental personal
 workflow: automated tests verify mechanics, not accuracy on your inbox.
 
 **`process.sh` enables cleanup by default:** Spam moves to Trash, and Ignore and
@@ -16,7 +17,7 @@ Review are archived. Start with the label-only commands below or use
 
 ## Requirements
 
-- macOS with Python 3.11+ and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+- macOS or Linux with Python 3.11+ and [uv](https://docs.astral.sh/uv/getting-started/installation/).
 - A Gmail account and a Google Cloud project with the Gmail API enabled.
 - A Google OAuth **Desktop app** client for that project.
 - A Jev API key. Classification and evaluation make requests to this paid external
@@ -55,6 +56,10 @@ routine paid receipts as ignore, and genuine reminders, unpaid bills, reply
 requests, and consequential account notices as important. Adjust the preferences
 and review examples to suit your needs.
 
+For a headless Linux server, follow [Linux migration and cron](#linux-migration-and-cron)
+below. The browser authorization instructions here are intended for a machine with
+an interactive browser.
+
 ### Connect Gmail
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create or select a
@@ -78,7 +83,7 @@ require authorizing again and granting access.
 
 The app uses the `gmail.modify` OAuth scope for reading messages, applying labels,
 archiving, and moving messages to Trash. It does not send emails or permanently
-delete them. OAuth tokens are stored in macOS Keychain. See Google's
+delete them. OAuth tokens use the selected credential backend. See Google's
 [Desktop OAuth guide](https://developers.google.com/identity/protocols/oauth2/native-app)
 and [Gmail scopes](https://developers.google.com/workspace/gmail/api/auth/scopes).
 
@@ -89,10 +94,10 @@ uv run better-email auth jev
 uv run better-email probe
 ```
 
-The first command prompts for the key without echoing it and saves it in Keychain.
+The first command prompts for the key without echoing it and saves it in the selected backend.
 `probe` sends a synthetic promotion to Jev; it does not access Gmail. You can also
 supply `TYPESAFE_API_KEY` through your environment. Scheduled jobs do not inherit
-interactive shell exports, so Keychain is the simpler choice for scheduling.
+interactive shell exports, so store the key using the configured backend for scheduling.
 Never put keys or OAuth files in committed source files.
 
 ## First run: inspect before moving messages
@@ -127,6 +132,11 @@ The script loads `private/profile.toml` if it exists; otherwise it inherits the
 stored policy. It stops on failure. Limits are 1–10000, apply separately to each
 step, and do not represent a single total across the workflow. Reclassification
 skips predictions already made with the active version and preserves human labels.
+The Python workflow runner holds `workflow.lock` in the data directory across all
+four commands. A second wrapper run using that directory exits without doing work.
+Each CLI command still uses its separate `run.lock`. Standalone commands may run
+between workflow steps; do not run separate schedulers for the same mailbox on
+different machines or data directories.
 
 ## Cleanup behavior
 
@@ -215,12 +225,22 @@ bounded excerpt. The full response may include embedded attachment bytes, which
 are discarded. It never renders HTML, follows links, loads images, fetches attachment
 references, or reads other thread messages for context. Text cleanup is heuristic.
 
-OAuth tokens and Jev keys live in **macOS Keychain**. SQLite lives by default in
-`~/Library/Application Support/BetterEmail` and stores headers, excerpts, labels,
+OAuth tokens and Jev keys use **macOS Keychain** by default. Linux requires explicit
+file-backend selection: `BETTER_EMAIL_SECRETS_BACKEND=file` or global
+`--secrets-backend file`. That backend stores `credentials.json` in the data directory.
+These files are **not encrypted**: they are owner-only (`0600`) inside an owner-only
+directory (`0700`). Existing group/world-readable credential files and symlinked
+credential files are rejected. Token updates use atomic replacement.
+
+SQLite defaults to `~/Library/Application Support/BetterEmail` on macOS and
+`$XDG_STATE_HOME/better-email` on Linux, falling back to `~/.local/state/better-email`
+when XDG_STATE_HOME is unset or not absolute. It stores headers, excerpts, labels,
 predictions, feedback, policy versions, sync checkpoints, and action journals.
 It is protected by filesystem permissions, not separate database encryption.
-Use `--data-dir PATH` before the subcommand for another location; that path also
-selects a separate credential namespace. Use it consistently.
+Use `BETTER_EMAIL_DATA_DIR` for the wrapper and all CLI commands, or global
+`--data-dir PATH` for a single command. The data path also selects the credential
+namespace; use it consistently. The CLI flag takes precedence over the environment.
+There is no automatic fallback from Keychain to file storage.
 
 ```sh
 uv run better-email feedback export private/feedback.json
@@ -279,7 +299,131 @@ all current inbox IDs and tracked messages are reconciled; remaining metadata wo
 stays queued. `status` shows queue size. Requests retry transient reads/inference
 at most three times; uncertain Gmail writes are journaled rather than blindly retried.
 
-## Run hourly with launchd
+## Linux migration and cron
+
+Install Python 3.11+ and uv on the server, clone this private repository using your
+GitHub credentials, and run `uv sync --locked`. Use a normal server user, not root.
+The server needs outbound access to Google and Jev; it needs no inbound web service.
+
+### 1. Stop the Mac scheduler and export state
+
+Disable your existing LaunchAgent and let any running process finish before the
+handoff. Only one machine should operate this mailbox. On the Mac, with the usual
+data directory and working Gmail authentication:
+
+```sh
+uv run better-email backup private/migration/state.sqlite3
+uv run better-email credentials export private/migration/credentials.json
+cp private/profile.toml private/migration/profile.toml
+chmod 600 private/migration/profile.toml
+```
+
+`backup` makes a consistent SQLite snapshot containing learning versions, corrections,
+sync progress, and action history; it excludes credentials. `credentials export`
+explicitly writes a secret bundle containing Gmail OAuth credentials and the stored
+Jev key (or `TYPESAFE_API_KEY` when set). Both commands refuse to overwrite existing
+files and create owner-only output. Use a new output path when repeating the export.
+No secret values are printed. `--gmail-only` exports just Gmail if you want to set
+the Jev key separately on the server.
+
+Keep the SQLite state: starting with an empty database loses your learning and
+the baseline used to distinguish application labels from human corrections.
+
+### 2. Transfer and import on a fresh server
+
+Use SSH/SCP to copy those three private files to an owner-only transfer directory
+on the server, outside Git. For example, from the Mac:
+
+```sh
+ssh user@server 'mkdir -p ~/.local/share/better-email-transfer && chmod 700 ~/.local/share/better-email-transfer'
+scp private/migration/state.sqlite3 private/migration/credentials.json private/migration/profile.toml user@server:.local/share/better-email-transfer/
+```
+
+Then on the server, from the cloned project's directory:
+
+```sh
+export BETTER_EMAIL_SECRETS_BACKEND=file
+export BETTER_EMAIL_DATA_DIR="$HOME/.local/state/better-email"
+mkdir -p "$BETTER_EMAIL_DATA_DIR" private
+chmod 700 "$BETTER_EMAIL_DATA_DIR" private "$HOME/.local/share/better-email-transfer"
+chmod 600 "$HOME/.local/share/better-email-transfer/credentials.json"
+
+# Fresh destination only: do not replace an existing server database.
+test ! -e "$BETTER_EMAIL_DATA_DIR/state.sqlite3" && install -m 600 "$HOME/.local/share/better-email-transfer/state.sqlite3" "$BETTER_EMAIL_DATA_DIR/state.sqlite3"
+install -m 600 "$HOME/.local/share/better-email-transfer/profile.toml" private/profile.toml
+uv run better-email credentials import "$HOME/.local/share/better-email-transfer/credentials.json"
+uv run better-email status
+uv run better-email probe
+./process.sh 100 --no-cleanup
+```
+
+Import validates the bundle, verifies Gmail access and account identity against the
+restored database, and stores credentials in the selected backend. It makes no mail
+changes. A different account is rejected before credentials are written. Access tokens
+are refreshed automatically and saved atomically on subsequent runs. If you exported
+Gmail only, run `uv run better-email auth jev` before probe or processing.
+
+After successful import, remove the transfer/export copies of the secret bundle
+when no longer needed. The active credentials stay in the server data directory.
+Private files must never be committed. The file backend is permission-protected,
+not a replacement for server/disk security.
+
+For a fresh account without prior state, skip SQLite/profile migration, create your
+own private profile from `config.example.toml`, and authorize Gmail interactively on
+a browser-equipped machine before exporting credentials. The server import step
+does not require a browser.
+
+Check your Google OAuth app's publishing status before unattended operation.
+External apps in **Testing** receive seven-day refresh tokens for Gmail scopes;
+configure an appropriate production publishing status and reauthorize as needed.
+Revocation and account policy changes can still require another login. See
+[Google's refresh-token documentation](https://developers.google.com/identity/protocols/oauth2#expiration).
+
+### 3. Schedule every 30 minutes
+
+Create a private log directory, then open your **server user's** crontab with `crontab -e`:
+
+```sh
+mkdir -p private/logs
+chmod 700 private/logs
+```
+
+Example crontab (replace every `/home/you` with the actual absolute home path):
+
+```cron
+SHELL=/bin/bash
+PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+BETTER_EMAIL_SECRETS_BACKEND=file
+BETTER_EMAIL_DATA_DIR=/home/you/.local/state/better-email
+
+*/30 * * * * umask 077; /bin/bash /home/you/better-email-filter/process.sh 100 >> /home/you/better-email-filter/private/logs/process.log 2>&1
+```
+
+This runs at :00 and :30 with cleanup enabled. Add `--no-cleanup` after `100` for
+label-only operation. Use the same data-directory setting during manual runs and
+cron. The built-in workflow lock prevents overlap; no separate `flock` command is
+required. Skipped overlapping runs exit nonzero. Cron does not catch up missed runs
+after server downtime, but Gmail history is reconciled on the next successful run.
+
+Review logs and configure log rotation with your server's normal tooling. For example,
+an administrator can install this logrotate configuration after adjusting paths/user:
+
+```text
+/home/you/better-email-filter/private/logs/process.log {
+    su you you
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+```
+
+`copytruncate` keeps a running job's log descriptor usable, with a small risk of losing
+lines during rotation. Remove/comment the crontab entry to disable scheduling.
+
+## Run hourly with launchd on macOS
 
 Once manual runs work, generate a personal plist from the project root. This uses
 local paths and does not install or start anything:
@@ -368,5 +512,5 @@ credentials or access real mail. The package and command retain the name
 `better-email`; the repository is named `better-email-filter`.
 
 See [SPEC.md](SPEC.md) for behavior and [PLAN.md](PLAN.md) for implementation scope.
-Attachment analysis, permanent deletion, model-weight fine-tuning, and non-macOS
-credential storage are not implemented.
+Attachment analysis, permanent deletion, model-weight fine-tuning, and Windows
+support are not implemented. CI runs synthetic tests on Linux and macOS.

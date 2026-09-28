@@ -2,7 +2,7 @@
 
 ## Scope
 
-A macOS command-line application for one Gmail account per local data directory.
+A macOS/Linux command-line application for one Gmail account per local data directory.
 It uses Jev for three-category email classification, supports a Spanish/English
 policy, and adapts through explicit human feedback. Configuration and personal
 identity details belong in ignored private files, not source control.
@@ -62,7 +62,13 @@ chosen and measured by each user.
 
 ## Storage and reliability
 
-OAuth and Jev credentials use macOS Keychain. Private-permission SQLite stores message
+OAuth and Jev credentials use macOS Keychain by default. Headless Linux requires
+explicit selection of owner-only, unencrypted credential files in the data directory;
+there is no silent fallback. Existing unsafe files are rejected and token updates
+replace the file atomically. Credential export/import supports a browser-free server
+handoff, verifies Gmail/account identity before import, and never prints credentials.
+SQLite backups preserve learning and journals without including credentials.
+Private-permission SQLite stores message
 references, headers, capped excerpts, feedback, version snapshots, predictions, sync
 progress, and action journals. Full messages and attachments are not retained. SQLite
 is not separately encrypted. Schema updates preserve existing state.
@@ -76,11 +82,16 @@ Incremental Gmail history uses a durable queue. Expired history triggers inbox-I
 rediscovery and tracked-message reconciliation. Limits bound discovery/inference/
 write batches separately. Transient reads and inference have bounded retries; writes
 are journaled. Commands lock their data directory to avoid concurrent state mutation.
+The shell workflow holds a separate lock across all four subprocesses. Environment
+configuration propagates to every step; duplicate wrappers using the same directory
+exit without doing work. Cross-machine scheduling must be disabled during migration.
 
 ## Scheduling and validation
 
-The README documents a per-user hourly macOS LaunchAgent generated with local paths.
-Installation is explicit and requires working manual authentication first.
+The README documents hourly macOS LaunchAgents and a Linux cron job every 30 minutes,
+including migration, environment variables, permissions, and log rotation. Installation
+is explicit and requires working manual authentication first. Linux paths follow
+XDG_STATE_HOME with an explicit data-directory override; existing Mac paths stay unchanged.
 
 Automated tests use synthetic mail and mocked transports. Acceptance checks cover
 payload boundaries, MIME extraction, Gmail corrections, restart recovery, cleanup,

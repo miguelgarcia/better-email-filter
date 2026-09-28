@@ -245,11 +245,10 @@ def test_process_script_cleanup_options(tmp_path, args, limit, cleanup):
     )
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
-    assert len(lines) == 4
-    assert all(f"--limit {limit}" in line for line in lines)
-    assert lines[-1] == f"run better-email apply --limit {limit}" + (
-        " --cleanup" if cleanup else ""
-    )
+    assert lines == [
+        f"run --locked python -m better_email.workflow --limit {limit}"
+        + ("" if cleanup else " --no-cleanup")
+    ]
 
 
 @pytest.mark.parametrize(

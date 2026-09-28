@@ -48,15 +48,10 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-uv run better-email sync --limit "$limit"
-if [[ -f private/profile.toml ]]; then
-  uv run better-email --config private/profile.toml learn --activate --limit "$limit"
-else
-  uv run better-email learn --activate --limit "$limit"
-fi
-uv run better-email preview --reclassify --limit "$limit"
+# The Python runner holds a workflow lock while each CLI command uses its own state lock.
+# Environment settings for data directory and credential backend reach every step.
 if [[ "$cleanup" == true ]]; then
-  uv run better-email apply --limit "$limit" --cleanup
+  exec uv run --locked python -m better_email.workflow --limit "$limit"
 else
-  uv run better-email apply --limit "$limit"
+  exec uv run --locked python -m better_email.workflow --limit "$limit" --no-cleanup
 fi

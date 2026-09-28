@@ -24,6 +24,8 @@ exports/
 *.p12
 *.pfx
 oauth*.json
+*credentials*.json
+*secrets*.json
 .coverage
 htmlcov/
 .agents/
