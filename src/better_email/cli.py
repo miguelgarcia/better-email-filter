@@ -4,6 +4,7 @@ import argparse
 import getpass
 import json
 import os
+import sqlite3
 import sys
 import tomllib
 from contextlib import ExitStack
@@ -15,7 +16,15 @@ from .engine import Engine, learn, training_records
 from .evaluation import evaluate
 from .gmail import Gmail, authorize, credentials_from_json
 from .jev import Jev
-from .local import Secrets, default_data_dir, locked_directory
+from .local import (
+    Secrets,
+    default_data_dir,
+    export_secret_json,
+    locked_directory,
+    private_output,
+    read_secret_json,
+    validate_secrets,
+)
 from .store import Store
 
 
@@ -29,11 +38,27 @@ def positive(value):
 def parser():
     p = argparse.ArgumentParser(description="Gmail triage with feedback and bounded body excerpts.")
     p.add_argument("--data-dir", type=Path, default=default_data_dir())
+    p.add_argument(
+        "--secrets-backend",
+        choices=["keychain", "file"],
+        help="Credential storage; defaults to BETTER_EMAIL_SECRETS_BACKEND or keychain",
+    )
     p.add_argument("--config", type=Path, help="TOML policy used when creating a learning version")
     sub = p.add_subparsers(dest="command", required=True)
-    auth = sub.add_parser("auth", help="Store credentials in macOS Keychain")
+    auth = sub.add_parser("auth", help="Store credentials in the configured backend")
     auth.add_argument("provider", choices=["gmail", "jev"])
     auth.add_argument("--client", type=Path, help="Google Desktop OAuth client JSON")
+    credentials = sub.add_parser("credentials", help="Export/import credentials for migration")
+    credential_sub = credentials.add_subparsers(dest="action", required=True)
+    credential_export = credential_sub.add_parser(
+        "export", help="Write an owner-only secret bundle"
+    )
+    credential_export.add_argument("path", type=Path)
+    credential_export.add_argument("--gmail-only", action="store_true")
+    credential_import = credential_sub.add_parser("import", help="Verify Gmail and import a bundle")
+    credential_import.add_argument("path", type=Path)
+    backup = sub.add_parser("backup", help="Write a consistent SQLite backup; excludes credentials")
+    backup.add_argument("path", type=Path)
     for name in ("sync", "preview", "apply"):
         command = sub.add_parser(
             name,
@@ -146,6 +171,8 @@ def run(args):
         stack.callback(store.close)
 
         def secrets():
+            if args.secrets_backend:
+                return Secrets(args.data_dir, backend=args.secrets_backend)
             return Secrets(args.data_dir)
 
         def gmail():
@@ -170,10 +197,52 @@ def run(args):
                 base = json.loads(store.get_meta("last_policy"))
             return read_policy(args.config, base)
 
+        if args.command == "backup":
+            with private_output(args.path) as temporary:
+                destination = sqlite3.connect(temporary)
+                try:
+                    store.db.backup(destination)
+                finally:
+                    destination.close()
+            return {"backup": str(args.path), "credentials_included": False}
+
+        if args.command == "credentials":
+            vault = secrets()
+            if args.action == "export":
+                values = {"gmail": vault.get("gmail")}
+                if not args.gmail_only:
+                    values["jev"] = os.environ.get("TYPESAFE_API_KEY") or vault.get("jev")
+                credentials = credentials_from_json(values["gmail"])
+                if not credentials.refresh_token:
+                    raise AppError("Gmail credentials need a refresh token; authorize again.")
+                export_secret_json(args.path, {"format": 1, "credentials": values})
+                return {"export": str(args.path), "providers": sorted(values)}
+            bundle = read_secret_json(args.path)
+            if (
+                set(bundle) != {"format", "credentials"}
+                or type(bundle["format"]) is not int
+                or bundle["format"] != 1
+            ):
+                raise AppError("Unsupported credential bundle format.")
+            values = validate_secrets(bundle["credentials"])
+            if "gmail" not in values:
+                raise AppError("Credential bundles must include Gmail credentials.")
+            credentials = credentials_from_json(values["gmail"])
+            if not credentials.refresh_token:
+                raise AppError("Gmail credentials need a refresh token; authorize again.")
+            client = Gmail(credentials, lambda value: None)
+            stack.callback(client.close)
+            # Verify account identity before writing any credentials, including the Jev key.
+            store.bind_account(client.profile()["emailAddress"])
+            vault.set_many(dict(values, gmail=credentials.to_json()))
+            return {"imported": sorted(values), "gmail_verified": True}
+
         if args.command == "auth":
             vault = secrets()
             if args.provider == "jev":
-                key = getpass.getpass("Jev API key (saved in macOS Keychain): ").strip()
+                key = getpass.getpass(
+                    "Jev API key (saved in configured credential storage): "
+                ).strip()
                 if not key:
                     raise AppError("API key cannot be empty.")
                 vault.set("jev", key)
